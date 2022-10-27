@@ -24,6 +24,8 @@ if addon.version == "@project-version" or addon.version == "wowi:version" then
     addon.version = "SCM"
 end
 
+local errorHandler = geterrorhandler()
+
 --[[-------------------------------------------------------------------------
 --  Debug support
 -------------------------------------------------------------------------]]--
@@ -118,28 +120,179 @@ end
 
 addon.eventFrame = CreateFrame("Frame", addonName .. "EventFrame", UIParent)
 local eventMap = {}
+local EventedMixin = {}
 
-function addon:RegisterEvent(event, handler)
-    assert(eventMap[event] == nil, "Attempt to re-register event: " .. tostring(event))
-    eventMap[event] = handler and handler or event
-    addon.eventFrame:RegisterEvent(event)
+-- Allow multiple handlers to be registered, called in registration order
+function EventedMixin:RegisterEvent(event, handler)
+    local handler = handler and handler or event
+    if eventMap[event] then
+        for idx, value in ipairs(eventMap[event]) do
+            local found = false
+            if type(handler) == "function" and value == handler then
+                found = true
+            elseif type(handler) == "string" and type(value) == "table" and value.key == handler then
+                found = true
+            end
+        end
+
+        if found then
+            assert(eventMap[event] == nil, string.format("Attempt to re-register event '%s' with handler '%s'", tostring(event), tostring(handler)))
+        end
+    end
+
+    eventMap[event] = eventMap[event] or {}
+
+    -- Convert handler to a table if it's a string
+    if type(handler) == "string" then
+        handler = {
+            type = "method",
+            key = handler,
+            obj = self,
+        }
+    end
+
+    table.insert(eventMap[event], handler)
+
+    if #eventMap[event] == 1 then
+        addon.eventFrame:RegisterEvent(event)
+    end
 end
 
-function addon:UnregisterEvent(event)
+-- Remove event registration for a specific handler, idempotent
+function EventedMixin:UnregisterEvent(event, handler)
     assert(type(event) == "string", "Invalid argument to 'UnregisterEvent'")
-    eventMap[event] = nil
-    addon.eventFrame:UnregisterEvent(event)
+
+    local handler = handler and handler or event
+    if eventMap[event] then
+        local foundIdx = nil
+        for idx, value in ipairs(eventMap[event]) do
+            if type(handler) == "function" and value == handler then
+                foundIdx = idx
+            elseif type(handler) == "string" and type(value) == "table" and value.key == handler then
+                foundIdx = idx
+            end
+        end
+
+        if foundIdx and foundIdx > 0 then
+            table.remove(eventMap[event], foundIdx)
+        end
+
+        if #eventMap[event] == 0 then
+            eventMap[event] = nil
+            addon.eventFrame:UnregisterEvent(event)
+        end
+    end
 end
 
 addon.eventFrame:SetScript("OnEvent", function(frame, event, ...)
-    local handler = eventMap[event]
-    local handler_t = type(handler)
-    if handler_t == "function" then
-        handler(event, ...)
-    elseif handler_t == "string" and addon[handler] then
-        addon[handler](addon, event, ...)
+    local handlers = eventMap[event]
+
+    for idx, handler in ipairs(handlers) do
+        local handler_t = type(handler)
+        if handler_t == "function" then
+            xpcall(handler, errorHandler, event, ...)
+        elseif handler_t == "table" then
+            local obj = handler.obj
+            local key = handler.key
+            if obj[key] then
+                xpcall(obj[key], errorHandler, obj, event, ...)
+            end
+        end
     end
 end)
+
+Mixin(addon, EventedMixin)
+
+--[[-------------------------------------------------------------------------
+--  Module support
+-------------------------------------------------------------------------]]--
+
+local modules = {}
+
+-- Declared here, but defined below in initialize/init
+local initializeModule
+
+function addon:RegisterModule(module, name)
+    assert(type(name) == "string", "Invalid argument to 'RegisterModule'")
+
+    module.name = name
+    for idx, value in ipairs(modules) do
+        if value == module then
+            error(string.format("Attempt to re-register module: %s (%s)", name, tostring(module)))
+        end
+    end
+
+    table.insert(modules, module)
+
+    Mixin(module, EventedMixin)
+    Mixin(module, {
+        Printf = addon.Printf,
+    })
+
+    -- See if we need to initialize due to late registration
+    initializeModule(module)
+end
+
+--[[-------------------------------------------------------------------------
+--  Setup Initialize/Enable support
+-------------------------------------------------------------------------]]--
+
+local enableCalled = false
+local initializeCalled = false
+
+local enableHandler = function(event, ...)
+    enableCalled = true
+    local handler = "Enable"
+
+    if type(addon[handler]) == "function" then
+        xpcall(addon[handler], errorHandler, addon)
+    end
+
+    for idx, module in ipairs(modules) do
+        if type(module[handler]) == "function" then
+            xpcall(module[handler], errorHandler, module)
+        end
+    end
+end
+
+-- Pre-declare so it can be used within the closure
+local initializeHandler
+initializeHandler = function(event, ...)
+    initializeCalled = true
+    local handler = "Initialize"
+
+    if ... == addonName then
+        addon:UnregisterEvent("ADDON_LOADED", initializeHandler)
+        if type(addon[handler]) == "function" then
+            xpcall(addon[handler], errorHandler, addon)
+        end
+
+        for idx, module in ipairs(modules) do
+            if type(module[handler]) == "function" then
+                xpcall(module[handler], errorHandler, module)
+            end
+        end
+
+        -- If this addon was loaded-on-demand, trigger 'Enable' as well
+        if IsLoggedIn() then
+            -- defer to the enableHandler directly
+            enableHandler()
+        end
+    end
+end
+
+initializeModule = function(module)
+    if initializeCalled and type(module["Initialize"]) == "function" then
+        xpcall(module["Initialize"], module)
+    end
+
+    if enableCalled and type(module["Enable"]) == "function" then
+        xpcall(module["Enable"], module)
+    end
+end
+
+addon:RegisterEvent("PLAYER_LOGIN", enableHandler)
+addon:RegisterEvent("ADDON_LOADED", initializeHandler)
 
 --[[-------------------------------------------------------------------------
 --  Message support
@@ -167,25 +320,6 @@ function addon:FireMessage(name, ...)
         addon[handler](addon, name, ...)
     end
 end
-
---[[-------------------------------------------------------------------------
---  Setup Initialize/Enable support
--------------------------------------------------------------------------]]--
-
-addon:RegisterEvent("PLAYER_LOGIN", "Enable")
-addon:RegisterEvent("ADDON_LOADED", function(event, ...)
-    if ... == addonName then
-        addon:UnregisterEvent("ADDON_LOADED")
-        if type(addon["Initialize"]) == "function" then
-            addon["Initialize"](addon)
-        end
-
-        -- If this addon was loaded-on-demand, trigger 'Enable' as well
-        if IsLoggedIn() and type(addon["Enable"]) == "function" then
-            addon["Enable"](addon)
-        end
-    end
-end)
 
 --[[-------------------------------------------------------------------------
 --  Support for deferred execution (when in-combat)
