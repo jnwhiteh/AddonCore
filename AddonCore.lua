@@ -27,6 +27,7 @@ local GetLocale = GetLocale
 local InCombatLockdown = InCombatLockdown
 local IsLoggedIn = IsLoggedIn
 local Mixin = Mixin
+---@diagnostic disable-next-line: undefined-field
 local twipe = table.wipe
 local UIParent = UIParent
 
