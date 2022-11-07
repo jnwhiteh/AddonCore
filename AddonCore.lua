@@ -18,6 +18,18 @@ local addonName, addon = ...
 -- Set global name of addon
 _G[addonName] = addon
 
+-- Globals used in this library
+local CreateFrame = CreateFrame
+local GetAddOnMetadata = GetAddOnMetadata
+local GetBuildInfo = GetBuildInfo
+local geterrorhandler = geterrorhandler
+local GetLocale = GetLocale
+local InCombatLockdown = InCombatLockdown
+local IsLoggedIn = IsLoggedIn
+local Mixin = Mixin
+local twipe = table.wipe
+local UIParent = UIParent
+
 -- Extract version information from TOC file
 addon.version = GetAddOnMetadata(addonName, "Version")
 if addon.version == "@project-version" or addon.version == "wowi:version" then
@@ -126,8 +138,9 @@ local EventedMixin = {}
 function EventedMixin:RegisterEvent(event, handler)
     local handler = handler and handler or event
     if eventMap[event] then
+        local found = false
+
         for idx, value in ipairs(eventMap[event]) do
-            local found = false
             if type(handler) == "function" and value == handler then
                 found = true
             elseif type(handler) == "string" and type(value) == "table" and value.key == handler then
@@ -361,7 +374,7 @@ deferframe:SetScript("OnEvent", function(self, event, ...)
     for idx, thing in ipairs(deferframe.queue) do
         runDeferred(thing)
     end
-    table.wipe(deferframe.queue)
+    twipe(deferframe.queue)
 end)
 
 --[[-------------------------------------------------------------------------
