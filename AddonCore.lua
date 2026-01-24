@@ -13,21 +13,49 @@
 --       have been loaded and initialized.
 -------------------------------------------------------------------------]]--
 
-local addonName, addon = ...
+local addonName = select(1, ...)
+
+---@alias EventHandler
+---| string
+---| fun(...: any)
+
+---@class AddonCore
+---@field RegisterEvent fun(self: AddonCore, event: string, handler: EventHandler?)
+---@field UnregisterEvent fun(self: AddonCore, event: string, handler: EventHandler?)
+---@field APIIsTrue fun(self:AddonCore, val: any): boolean
+---@field ProjectIsRetail fun(self: AddonCore): boolean
+---@field ProjectIsClassic fun(self: AddonCore): boolean
+---@field ProjectIsBCC fun(self: AddonCore): boolean
+---@field ProjectIsWrath fun(self: AddonCore): boolean
+---@field ProjectIsCataclysm fun(self: AddonCore): boolean
+---@field ProjectIsMists fun(self: AddonCore): boolean
+---@field ProjectIsDragonflight fun(self: AddonCore): boolean
+---@field ProjectIsWarWithin fun(self: AddonCore): boolean
+---@field ProjectIsMidnight fun(self: AddonCore): boolean
+---@field Printf fun(self: AddonCore, msg: string, ...: any)
+---@field version string
+---@field RegisterModule fun(self: AddonCore, module: table, name: string)
+---@field RegisterMessage fun(self: AddonCore, name: string, handler: EventHandler?)
+---@field UnregisterMessage fun(self: AddonCore, name: string)
+---@field FireMessage fun(self: AddonCore, name: string, ...: any)
+---@field Defer fun(self: AddonCore, ...:any)
+---@field L table<string,string>
+---@field RegisterLocale fun(self: AddonCore, locale: string, tbl: table<string,string>)
+
+local addon = select(2, ...)
 
 -- Set global name of addon
 _G[addonName] = addon
 
 -- Globals used in this library
 local CreateFrame = CreateFrame
-local GetAddOnMetadata = GetAddOnMetadata
+local GetAddOnMetadata = C_AddOns and C_AddOns.GetAddOnMetadata or GetAddOnMetadata
 local GetBuildInfo = GetBuildInfo
 local geterrorhandler = geterrorhandler
 local GetLocale = GetLocale
 local InCombatLockdown = InCombatLockdown
 local IsLoggedIn = IsLoggedIn
 local Mixin = Mixin
----@diagnostic disable-next-line: undefined-field
 local twipe = table.wipe
 local UIParent = UIParent
 
@@ -71,14 +99,14 @@ end
 -------------------------------------------------------------------------]]--
 
 -- Returns true if the API value is true-ish (handles old 1/nil returns)
-function addon:APIIsTrue(val, ...)
-	if type(val) == "boolean" then
-		return val
-	elseif type(val) == "number" then
-		return val == 1
-	else
-		return false
-	end
+function addon:APIIsTrue(val)
+    if type(val) == "boolean" then
+        return val
+    elseif type(val) == "number" then
+        return val == 1
+    else
+        return false
+    end
 end
 
 local projects = {
@@ -86,6 +114,8 @@ local projects = {
     classic = "WOW_PROJECT_CLASSIC",
     bcc = "WOW_PROJECT_BURNING_CRUSADE_CLASSIC",
     wrath = "WOW_PROJECT_WRATH_CLASSIC",
+    cataclysm = "WOW_PROJECT_CATACLYSM_CLASSIC",
+    mists = "WOW_PROJECT_MISTS_CLASSIC",
 }
 
 local project_id = _G["WOW_PROJECT_ID"]
@@ -103,12 +133,30 @@ function addon:ProjectIsBCC()
 end
 
 function addon:ProjectIsWrath()
-    return project_id ==  _G[projects.wrath]
+    return project_id == _G[projects.wrath]
 end
 
-function addon:IsDragonflight()
+function addon:ProjectIsCataclysm()
+    return project_id == _G[projects.cataclysm]
+end
+
+function addon:ProjectIsMists()
+    return project_id == _G[projects.mists]
+end
+
+function addon:ProjectIsDragonflight()
     local toc = select(4, GetBuildInfo())
-    return toc >= 100000
+    return toc >= 100000 and toc < 110000
+end
+
+function addon:ProjectIsWarWithin()
+    local toc = select(4, GetBuildInfo())
+    return toc >= 110000 and toc < 120000
+end
+
+function addon:ProjectIsMidnight()
+    local toc = select(4, GetBuildInfo())
+    return toc >= 120000 and toc < 130000
 end
 
 --[[-------------------------------------------------------------------------
@@ -131,7 +179,7 @@ end
 --  Event registration and dispatch
 -------------------------------------------------------------------------]]--
 
-addon.eventFrame = CreateFrame("Frame", addonName .. "EventFrame", UIParent)
+local eventFrame = CreateFrame("Frame", addonName .. "EventFrame", UIParent)
 local eventMap = {}
 local EventedMixin = {}
 
@@ -144,8 +192,11 @@ function EventedMixin:RegisterEvent(event, handler)
         for idx, value in ipairs(eventMap[event]) do
             if type(handler) == "function" and value == handler then
                 found = true
-            elseif type(handler) == "string" and type(value) == "table" and value.key == handler then
-                found = true
+            elseif type(handler) == "string" and type(value) == "table" then
+                -- Method call, so make sure obj matches as well
+                if value.obj == self and value.key == handler then
+                    found = true
+                end
             end
         end
 
@@ -168,7 +219,7 @@ function EventedMixin:RegisterEvent(event, handler)
     table.insert(eventMap[event], handler)
 
     if #eventMap[event] == 1 then
-        addon.eventFrame:RegisterEvent(event)
+        eventFrame:RegisterEvent(event)
     end
 end
 
@@ -193,13 +244,14 @@ function EventedMixin:UnregisterEvent(event, handler)
 
         if #eventMap[event] == 0 then
             eventMap[event] = nil
-            addon.eventFrame:UnregisterEvent(event)
+            eventFrame:UnregisterEvent(event)
         end
     end
 end
 
-addon.eventFrame:SetScript("OnEvent", function(frame, event, ...)
+eventFrame:SetScript("OnEvent", function(frame, event, ...)
     local handlers = eventMap[event]
+    if not handlers then return end
 
     for idx, handler in ipairs(handlers) do
         local handler_t = type(handler)
@@ -216,6 +268,95 @@ addon.eventFrame:SetScript("OnEvent", function(frame, event, ...)
 end)
 
 Mixin(addon, EventedMixin)
+
+--[[-------------------------------------------------------------------------
+--  Message registration and dispatch
+-------------------------------------------------------------------------]]--
+
+local messageMap = {}
+local MessagedMixin = {}
+
+-- Allow multiple handlers to be registered, called in registration order
+function MessagedMixin:RegisterMessage(message, handler)
+    local handler = handler and handler or message
+    if messageMap[message] then
+        local found = false
+
+        for idx, value in ipairs(messageMap[message]) do
+            if type(handler) == "function" and value == handler then
+                found = true
+            elseif type(handler) == "string" and type(value) == "table" then
+                -- Method call, so make sure obj matches as well
+                if value.obj == self and value.key == handler then
+                    found = true
+                end
+            end
+        end
+
+        if found then
+            assert(messageMap[message] == nil, string.format("Attempt to re-register message '%s' with handler '%s'", tostring(message), tostring(handler)))
+        end
+    end
+
+    messageMap[message] = messageMap[message] or {}
+
+    -- Convert handler to a table if it's a string
+    if type(handler) == "string" then
+        handler = {
+            type = "method",
+            key = handler,
+            obj = self,
+        }
+    end
+
+    table.insert(messageMap[message], handler)
+end
+
+-- Remove message registration for a specific handler, idempotent
+function MessagedMixin:UnregisterMessage(message, handler)
+    assert(type(message) == "string", "Invalid argument to 'Unregistermessage'")
+
+    local handler = handler and handler or message
+    if messageMap[message] then
+        local foundIdx = nil
+        for idx, value in ipairs(messageMap[message]) do
+            if type(handler) == "function" and value == handler then
+                foundIdx = idx
+            elseif type(handler) == "string" and type(value) == "table" and value.key == handler then
+                foundIdx = idx
+            end
+        end
+
+        if foundIdx and foundIdx > 0 then
+            table.remove(messageMap[message], foundIdx)
+        end
+
+        if #messageMap[message] == 0 then
+            messageMap[message] = nil
+        end
+    end
+end
+
+function MessagedMixin:FireMessage(message, ...)
+    local handlers = messageMap[message]
+    if not handlers then return end
+
+    for idx, handler in ipairs(handlers) do
+        local handler_t = type(handler)
+        if handler_t == "function" then
+            xpcall(handler, errorHandler, message, ...)
+        elseif handler_t == "table" then
+            local obj = handler.obj
+            local key = handler.key
+            if obj[key] then
+                xpcall(obj[key], errorHandler, obj, message, ...)
+            end
+        end
+    end
+end
+
+Mixin(addon, MessagedMixin)
+
 
 --[[-------------------------------------------------------------------------
 --  Module support
@@ -239,6 +380,7 @@ function addon:RegisterModule(module, name)
     table.insert(modules, module)
 
     Mixin(module, EventedMixin)
+    Mixin(module, MessagedMixin)
     Mixin(module, {
         Printf = addon.Printf,
     })
@@ -307,33 +449,6 @@ end
 
 addon:RegisterEvent("PLAYER_LOGIN", enableHandler)
 addon:RegisterEvent("ADDON_LOADED", initializeHandler)
-
---[[-------------------------------------------------------------------------
---  Message support
--------------------------------------------------------------------------]]--
-
-local messageMap = {}
-
-function addon:RegisterMessage(name, handler)
-    assert(messageMap[name] == nil, "Attempt to re-register message: " .. tostring(name))
-    messageMap[name] = handler and handler or name
-end
-
-function addon:UnregisterMessage(name)
-    assert(type(name) == "string", "Invalid argument to 'UnregisterMessage'")
-    messageMap[name] = nil
-end
-
-function addon:FireMessage(name, ...)
-    assert(type(name) == "string", "Invalid argument to 'FireMessage'")
-    local handler = messageMap[name]
-    local handler_t = type(handler)
-    if handler_t == "function" then
-        handler(name, ...)
-    elseif handler_t == "string" and addon[handler] then
-        addon[handler](addon, name, ...)
-    end
-end
 
 --[[-------------------------------------------------------------------------
 --  Support for deferred execution (when in-combat)
