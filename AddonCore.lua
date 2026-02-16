@@ -349,9 +349,9 @@ local MessagedMixin = {}
 
 local function findMessageHandlerIdx(self, messageHandlers, handler)
     for idx, value in ipairs(messageHandlers) do
-        if type(handler) == "function" and value == handler then
+        if type(handler) == "function" and value.func == handler then
             return idx
-        elseif type(handler) == "string" and type(value) == "table" and value.obj == self and value.key == handler then
+        elseif type(handler) == "string" and value.obj == self and value.key == handler then
             return idx
         end
     end
@@ -368,16 +368,8 @@ function MessagedMixin:RegisterMessage(message, handler)
 
     messageMap[message] = messageMap[message] or {}
 
-    -- Convert handler to a table if it's a string
-    if type(handler) == "string" then
-        handler = {
-            type = "method",
-            key = handler,
-            obj = self,
-        }
-    end
-
-    table.insert(messageMap[message], handler)
+    local handlerObj = createHandlerObject(self, handler)
+    table.insert(messageMap[message], handlerObj)
 end
 
 -- Remove message registration for a specific handler, idempotent
@@ -404,10 +396,9 @@ function MessagedMixin:FireMessage(message, ...)
     if not handlers then return end
 
     for _, handler in ipairs(handlers) do
-        local handler_t = type(handler)
-        if handler_t == "function" then
-            xpcall(handler, errorHandler, message, ...)
-        elseif handler_t == "table" then
+        if handler.type == "func" then
+            xpcall(handler.func, errorHandler, message, ...)
+        elseif handler.type == "method" then
             local obj = handler.obj
             local key = handler.key
             if obj[key] then
