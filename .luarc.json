@@ -1,0 +1,15 @@
+{
+  "runtime.version": "Lua 5.1",
+  "diagnostics.globals": [
+    "C_AddOns",
+    "CreateFrame",
+    "GetAddOnMetadata",
+    "GetBuildInfo",
+    "GetLocale",
+    "InCombatLockdown",
+    "IsLoggedIn",
+    "Mixin",
+    "UIParent",
+    "geterrorhandler"
+  ]
+}
