@@ -8,17 +8,19 @@ AddonCore is a slim embedded library for World of Warcraft addon development. It
 
 ## Development Environment
 
-**No build/test/lint commands** - This is a Lua library loaded directly by WoW. Testing happens in-game.
+**Run tests**: `lua tests/run.lua` from the project root. The test harness mocks WoW API globals, allowing command-line testing of core functionality.
 
-**LSP warnings for WoW globals are expected** - Functions like `CreateFrame`, `GetBuildInfo`, `UIParent`, etc. are WoW API globals. The Lua language server doesn't know about them unless configured with WoW API type definitions.
+**LSP warnings for WoW globals are expected** - Functions like `CreateFrame`, `GetBuildInfo`, `UIParent`, etc. are WoW API globals. The Lua language server doesn't know about them unless configured with WoW API type definitions. Similarly, LSP warnings about `xpcall` argument counts are expected (WoW's xpcall signature differs from standard Lua 5.1).
 
 ## Architecture
 
 The library creates an addon object passed via varargs (`local addon = select(2, ...)`), registers it globally (`_G[addonName] = addon`), then mixes in functionality via two patterns:
 
 **Mixins** (mixed into addon and modules):
-- `EventedMixin`: Multi-handler event registration with `RegisterEvent`/`UnregisterEvent`
+- `EventedMixin`: Multi-handler event registration with `RegisterEvent`/`RegisterUnitEvent`/`UnregisterEvent`
 - `MessagedMixin`: Internal pub/sub via `RegisterMessage`/`UnregisterMessage`/`FireMessage`
+
+**Unit events**: `RegisterUnitEvent` filters dispatch by unit - handlers only fire when the incoming unit matches one they registered for. Units are stored as dictionary tables for O(1) lookup. Cannot mix unit and non-unit handlers for the same event.
 
 **Lifecycle hooks** (called automatically):
 - `Initialize`: Called on `ADDON_LOADED` when saved variables are ready
