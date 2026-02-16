@@ -198,7 +198,10 @@ local function createHandlerObject(self, handler, units)
     end
 
     if units then
-        obj.units = {unpack(units)}
+        obj.units = {}
+        for _, unit in ipairs(units) do
+            obj.units[unit] = true
+        end
     end
 
     return obj
@@ -209,7 +212,7 @@ local function getUnitArgTable(eventHandlers, newUnits)
     local units = {}
     for _, value in ipairs(eventHandlers) do
         if value.units then
-            for _, unit in ipairs(value.units) do
+            for unit in pairs(value.units) do
                 units[unit] = true
             end
         end
@@ -325,14 +328,17 @@ eventFrame:SetScript("OnEvent", function(_, event, ...)
     local handlers = eventMap[event]
     if not handlers then return end
 
+    local unit = ...
     for _, handler in ipairs(handlers) do
-        if handler.type == "func" then
-            xpcall(handler.func, errorHandler, event, ...)
-        elseif handler.type == "method" then
-            local obj = handler.obj
-            local key = handler.key
-            if obj[key] then
-                xpcall(obj[key], errorHandler, obj, event, ...)
+        if not handler.units or handler.units[unit] then
+            if handler.type == "func" then
+                xpcall(handler.func, errorHandler, event, ...)
+            elseif handler.type == "method" then
+                local obj = handler.obj
+                local key = handler.key
+                if obj[key] then
+                    xpcall(obj[key], errorHandler, obj, event, ...)
+                end
             end
         end
     end
