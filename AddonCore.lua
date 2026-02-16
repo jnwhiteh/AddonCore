@@ -21,6 +21,7 @@ local addonName = select(1, ...)
 
 ---@class AddonCore
 ---@field RegisterEvent fun(self: AddonCore, event: string, handler: EventHandler?)
+---@field RegisterUnitEvent fun(self: AddonCore, event: string, handler: EventHandler?, ...: string)
 ---@field UnregisterEvent fun(self: AddonCore, event: string, handler: EventHandler?)
 ---@field APIIsTrue fun(self:AddonCore, val: any): boolean
 ---@field ProjectIsRetail fun(self: AddonCore): boolean
@@ -34,11 +35,12 @@ local addonName = select(1, ...)
 ---@field ProjectIsMidnight fun(self: AddonCore): boolean
 ---@field Printf fun(self: AddonCore, msg: string, ...: any)
 ---@field version string
+---@field IsInitialized fun(self: AddonCore): boolean
 ---@field RegisterModule fun(self: AddonCore, module: table, name: string)
 ---@field RegisterMessage fun(self: AddonCore, name: string, handler: EventHandler?)
 ---@field UnregisterMessage fun(self: AddonCore, name: string)
 ---@field FireMessage fun(self: AddonCore, name: string, ...: any)
----@field Defer fun(self: AddonCore, ...:any)
+---@field Defer fun(self: AddonCore, thing: string|fun())
 ---@field L table<string,string>
 ---@field RegisterLocale fun(self: AddonCore, locale: string, tbl: table<string,string>)
 
@@ -57,6 +59,7 @@ local InCombatLockdown = InCombatLockdown
 local IsLoggedIn = IsLoggedIn
 local Mixin = Mixin
 local twipe = table.wipe
+local unpack = unpack or table.unpack
 local UIParent = UIParent
 
 -- Extract version information from TOC file
@@ -183,81 +186,149 @@ local eventFrame = CreateFrame("Frame", addonName .. "EventFrame", UIParent)
 local eventMap = {}
 local EventedMixin = {}
 
--- Allow multiple handlers to be registered, called in registration order
-function EventedMixin:RegisterEvent(event, handler)
-    local handler = handler and handler or event
-    if eventMap[event] then
-        local found = false
+local function createHandlerObject(self, handler, units)
+    local obj = {}
+    if type(handler) == "function" then
+        obj.type = "func"
+        obj.func = handler
+    elseif type(handler) == "string" then
+        obj.type = "method"
+        obj.key = handler
+        obj.obj = self
+    end
 
-        for idx, value in ipairs(eventMap[event]) do
-            if type(handler) == "function" and value == handler then
-                found = true
-            elseif type(handler) == "string" and type(value) == "table" then
-                -- Method call, so make sure obj matches as well
-                if value.obj == self and value.key == handler then
-                    found = true
-                end
+    if units then
+        obj.units = {unpack(units)}
+    end
+
+    return obj
+end
+
+-- Find all existing registered units and add any new ones from newUnits
+local function getUnitArgTable(eventHandlers, newUnits)
+    local units = {}
+    for _, value in ipairs(eventHandlers) do
+        if value.units then
+            for _, unit in ipairs(value.units) do
+                units[unit] = true
             end
         end
+    end
 
-        if found then
-            assert(eventMap[event] == nil, string.format("Attempt to re-register event '%s' with handler '%s'", tostring(event), tostring(handler)))
+    if newUnits then
+        for _, unit in ipairs(newUnits) do
+            units[unit] = true
+        end
+    end
+
+    local result = {}
+    for unit in pairs(units) do
+        table.insert(result, unit)
+    end
+
+    return result
+end
+
+local function findHandlerIdx(self, eventHandlers, handler)
+    for idx, value in ipairs(eventHandlers) do
+        if type(handler) == "function" and value.func == handler then
+            return idx
+        elseif type(handler) == "string" and value.obj == self and value.key == handler then
+            return idx
+        end
+    end
+    return nil
+end
+
+local function hasUnitHandlers(event)
+    if not eventMap[event] then
+        return false
+    end
+    for _, handler in ipairs(eventMap[event]) do
+        if handler.units then
+            return true
+        end
+    end
+    return false
+end
+
+local function registerEvent(self, event, handler, units)
+    handler = handler or event
+    assert(type(handler) == "string" or type(handler) == "function", "Handler must be a string or function")
+    if eventMap[event] then
+        local foundIdx = findHandlerIdx(self, eventMap[event], handler)
+        assert(not foundIdx, string.format("Attempt to re-register event '%s' with handler '%s'", tostring(event), tostring(handler)))
+
+        local eventHasUnits = hasUnitHandlers(event)
+        if eventHasUnits and not units then
+            error(string.format("Event '%s' registered as UnitEvent, cannot mix unit and non-unit for the same event", event))
+        elseif not eventHasUnits and units then
+            error(string.format("Event '%s' registered as Event, cannot mix unit and non-unit for the same event", event))
         end
     end
 
     eventMap[event] = eventMap[event] or {}
 
-    -- Convert handler to a table if it's a string
-    if type(handler) == "string" then
-        handler = {
-            type = "method",
-            key = handler,
-            obj = self,
-        }
-    end
+    -- Convert handler to a table
+    local handlerObj = createHandlerObject(self, handler, units)
+    table.insert(eventMap[event], handlerObj)
 
-    table.insert(eventMap[event], handler)
-
-    if #eventMap[event] == 1 then
+    if units then
+        local unitArgs = getUnitArgTable(eventMap[event], units)
+        eventFrame:RegisterUnitEvent(event, unpack(unitArgs))
+    elseif #eventMap[event] == 1 then
         eventFrame:RegisterEvent(event)
     end
 end
 
--- Remove event registration for a specific handler, idempotent
+-- Allow multiple handlers to be registered, called in registration order
+function EventedMixin:RegisterEvent(event, handler)
+    return registerEvent(self, event, handler)
+end
+
+-- The same as above, but UnitEvents specifically, and handle registration correctly
+function EventedMixin:RegisterUnitEvent(event, handler, ...)
+    return registerEvent(self, event, handler, {...})
+end
+
+-- Remove event registration for a specific handler
 function EventedMixin:UnregisterEvent(event, handler)
     assert(type(event) == "string", "Invalid argument to 'UnregisterEvent'")
 
-    local handler = handler and handler or event
-    if eventMap[event] then
-        local foundIdx = nil
-        for idx, value in ipairs(eventMap[event]) do
-            if type(handler) == "function" and value == handler then
-                foundIdx = idx
-            elseif type(handler) == "string" and type(value) == "table" and value.key == handler then
-                foundIdx = idx
-            end
-        end
+    handler = handler or event
+    if not eventMap[event] then
+        return
+    end
 
-        if foundIdx and foundIdx > 0 then
-            table.remove(eventMap[event], foundIdx)
-        end
+    local foundIdx = findHandlerIdx(self, eventMap[event], handler)
+    if not foundIdx then
+        return
+    end
 
-        if #eventMap[event] == 0 then
-            eventMap[event] = nil
+    local removedHandler = eventMap[event][foundIdx]
+    table.remove(eventMap[event], foundIdx)
+
+    if #eventMap[event] == 0 then
+        eventMap[event] = nil
+        eventFrame:UnregisterEvent(event)
+    elseif removedHandler.units then
+        local unitArgs = getUnitArgTable(eventMap[event])
+        if #unitArgs > 0 then
+            eventFrame:RegisterUnitEvent(event, unpack(unitArgs))
+        else
             eventFrame:UnregisterEvent(event)
         end
     end
 end
 
-eventFrame:SetScript("OnEvent", function(frame, event, ...)
+eventFrame:SetScript("OnEvent", function(_, event, ...)
     local handlers = eventMap[event]
     if not handlers then return end
 
-    for idx, handler in ipairs(handlers) do
-        local handler_t = type(handler)
-        if handler_t == "function" then
-            xpcall(handler, errorHandler, event, ...)
-        elseif handler_t == "table" then
+    for _, handler in ipairs(handlers) do
+        if handler.type == "func" then
+            xpcall(handler.func, errorHandler, event, ...)
+        elseif handler.type == "method" then
             local obj = handler.obj
             local key = handler.key
             if obj[key] then
@@ -276,26 +347,23 @@ Mixin(addon, EventedMixin)
 local messageMap = {}
 local MessagedMixin = {}
 
+local function findMessageHandlerIdx(self, messageHandlers, handler)
+    for idx, value in ipairs(messageHandlers) do
+        if type(handler) == "function" and value == handler then
+            return idx
+        elseif type(handler) == "string" and type(value) == "table" and value.obj == self and value.key == handler then
+            return idx
+        end
+    end
+    return nil
+end
+
 -- Allow multiple handlers to be registered, called in registration order
 function MessagedMixin:RegisterMessage(message, handler)
-    local handler = handler and handler or message
+    handler = handler or message
     if messageMap[message] then
-        local found = false
-
-        for idx, value in ipairs(messageMap[message]) do
-            if type(handler) == "function" and value == handler then
-                found = true
-            elseif type(handler) == "string" and type(value) == "table" then
-                -- Method call, so make sure obj matches as well
-                if value.obj == self and value.key == handler then
-                    found = true
-                end
-            end
-        end
-
-        if found then
-            assert(messageMap[message] == nil, string.format("Attempt to re-register message '%s' with handler '%s'", tostring(message), tostring(handler)))
-        end
+        local foundIdx = findMessageHandlerIdx(self, messageMap[message], handler)
+        assert(not foundIdx, string.format("Attempt to re-register message '%s' with handler '%s'", tostring(message), tostring(handler)))
     end
 
     messageMap[message] = messageMap[message] or {}
@@ -314,26 +382,20 @@ end
 
 -- Remove message registration for a specific handler, idempotent
 function MessagedMixin:UnregisterMessage(message, handler)
-    assert(type(message) == "string", "Invalid argument to 'Unregistermessage'")
+    assert(type(message) == "string", "Invalid argument to 'UnregisterMessage'")
 
-    local handler = handler and handler or message
-    if messageMap[message] then
-        local foundIdx = nil
-        for idx, value in ipairs(messageMap[message]) do
-            if type(handler) == "function" and value == handler then
-                foundIdx = idx
-            elseif type(handler) == "string" and type(value) == "table" and value.key == handler then
-                foundIdx = idx
-            end
-        end
+    handler = handler or message
+    if not messageMap[message] then
+        return
+    end
 
-        if foundIdx and foundIdx > 0 then
-            table.remove(messageMap[message], foundIdx)
-        end
+    local foundIdx = findMessageHandlerIdx(self, messageMap[message], handler)
+    if foundIdx then
+        table.remove(messageMap[message], foundIdx)
+    end
 
-        if #messageMap[message] == 0 then
-            messageMap[message] = nil
-        end
+    if #messageMap[message] == 0 then
+        messageMap[message] = nil
     end
 end
 
@@ -341,7 +403,7 @@ function MessagedMixin:FireMessage(message, ...)
     local handlers = messageMap[message]
     if not handlers then return end
 
-    for idx, handler in ipairs(handlers) do
+    for _, handler in ipairs(handlers) do
         local handler_t = type(handler)
         if handler_t == "function" then
             xpcall(handler, errorHandler, message, ...)
@@ -371,7 +433,7 @@ function addon:RegisterModule(module, name)
     assert(type(name) == "string", "Invalid argument to 'RegisterModule'")
 
     module.name = name
-    for idx, value in ipairs(modules) do
+    for _, value in ipairs(modules) do
         if value == module then
             error(string.format("Attempt to re-register module: %s (%s)", name, tostring(module)))
         end
@@ -391,12 +453,21 @@ end
 
 --[[-------------------------------------------------------------------------
 --  Setup Initialize/Enable support
+--
+--  These lifecycle events are handled on a dedicated frame, separate from
+--  the addon's event system to prevent potential overlap or issues.
 -------------------------------------------------------------------------]]--
+
+local initializeFrame = CreateFrame("Frame")
 
 local enableCalled = false
 local initializeCalled = false
 
-local enableHandler = function(event, ...)
+function addon:IsInitialized()
+    return initializeCalled
+end
+
+local enableHandler = function()
     enableCalled = true
     local handler = "Enable"
 
@@ -404,51 +475,53 @@ local enableHandler = function(event, ...)
         xpcall(addon[handler], errorHandler, addon)
     end
 
-    for idx, module in ipairs(modules) do
+    for _, module in ipairs(modules) do
         if type(module[handler]) == "function" then
             xpcall(module[handler], errorHandler, module)
         end
     end
 end
 
--- Pre-declare so it can be used within the closure
-local initializeHandler
-initializeHandler = function(event, ...)
+local initializeHandler = function()
     initializeCalled = true
     local handler = "Initialize"
 
-    if ... == addonName then
-        addon:UnregisterEvent("ADDON_LOADED", initializeHandler)
-        if type(addon[handler]) == "function" then
-            xpcall(addon[handler], errorHandler, addon)
-        end
+    if type(addon[handler]) == "function" then
+        xpcall(addon[handler], errorHandler, addon)
+    end
 
-        for idx, module in ipairs(modules) do
-            if type(module[handler]) == "function" then
-                xpcall(module[handler], errorHandler, module)
-            end
+    for _, module in ipairs(modules) do
+        if type(module[handler]) == "function" then
+            xpcall(module[handler], errorHandler, module)
         end
+    end
 
-        -- If this addon was loaded-on-demand, trigger 'Enable' as well
-        if IsLoggedIn() then
-            -- defer to the enableHandler directly
-            enableHandler()
-        end
+    -- If this addon was loaded-on-demand, trigger 'Enable' as well
+    if IsLoggedIn() then
+        enableHandler()
     end
 end
 
 initializeModule = function(module)
     if initializeCalled and type(module["Initialize"]) == "function" then
-        xpcall(module["Initialize"], module)
+        xpcall(module["Initialize"], errorHandler, module)
     end
 
     if enableCalled and type(module["Enable"]) == "function" then
-        xpcall(module["Enable"], module)
+        xpcall(module["Enable"], errorHandler, module)
     end
 end
 
-addon:RegisterEvent("PLAYER_LOGIN", enableHandler)
-addon:RegisterEvent("ADDON_LOADED", initializeHandler)
+initializeFrame:RegisterEvent("PLAYER_LOGIN")
+initializeFrame:RegisterEvent("ADDON_LOADED")
+initializeFrame:SetScript("OnEvent", function(_, event, arg1)
+    if event == "PLAYER_LOGIN" and not enableCalled then
+        enableHandler()
+    elseif event == "ADDON_LOADED" and arg1 == addonName and not initializeCalled then
+        initializeFrame:UnregisterEvent("ADDON_LOADED")
+        initializeHandler()
+    end
+end)
 
 --[[-------------------------------------------------------------------------
 --  Support for deferred execution (when in-combat)
@@ -469,25 +542,22 @@ end
 -- This method will defer the execution of a method or function until the
 -- player has exited combat. If they are already out of combat, it will
 -- execute the function immediately.
-function addon:Defer(...)
-    for i = 1, select("#", ...) do
-        local thing = select(i, ...)
-        local thing_t = type(thing)
-        if thing_t == "string" or thing_t == "function" then
-            if InCombatLockdown() then
-                deferframe.queue[#deferframe.queue + 1] = select(i, ...)
-            else
-                runDeferred(thing)
-            end
+function addon:Defer(thing)
+    local thing_t = type(thing)
+    if thing_t == "string" or thing_t == "function" then
+        if InCombatLockdown() then
+            deferframe.queue[#deferframe.queue + 1] = thing
         else
-            error("Invalid object passed to 'Defer'")
+            runDeferred(thing)
         end
+    else
+        error("Invalid object passed to 'Defer'")
     end
 end
 
 deferframe:RegisterEvent("PLAYER_REGEN_ENABLED")
-deferframe:SetScript("OnEvent", function(self, event, ...)
-    for idx, thing in ipairs(deferframe.queue) do
+deferframe:SetScript("OnEvent", function()
+    for _, thing in ipairs(deferframe.queue) do
         runDeferred(thing)
     end
     twipe(deferframe.queue)
